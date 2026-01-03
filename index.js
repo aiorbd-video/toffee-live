@@ -2,9 +2,9 @@ import express from "express";
 import fetch from "node-fetch";
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
 
-// ====== CORS ======
+// ---------- CORS ----------
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Headers", "*");
@@ -13,14 +13,14 @@ app.use((req, res, next) => {
   next();
 });
 
-// ====== MAIN PROXY ======
+// ---------- PROXY ----------
 app.get("/", async (req, res) => {
   const target = req.query.url;
   if (!target) return res.status(400).send("Missing url param");
 
-  // 🔐 Toffee cookie (update when expires)
+  // 🔐 Update when expires
   const cookie =
-    "Edge-Cache-Cookie=URLPrefix=aHR0cHM6Ly9tcHJvZC1jZG4udG9mZmVlbGl2ZS5jb20:Expires=1767503395:KeyName=prod_live_events:Signature=6f_ucnWVnVHGymARY6AfUORlyrNVxxa5gtPK4XZ5Lu8mxBbowAKVl_yGmtYH8lvTa9On7CJdl14m8cyrxWt-BQ";
+    "Edge-Cache-Cookie=URLPrefix=aHR0cHM6Ly9tcHJvZC1jZG4udG9mZmVlbGl2ZS5jb20:Expires=1767503395:KeyName=prod_live_events:Signature=REPLACE_IF_EXPIRED";
 
   try {
     const headers = {
@@ -30,21 +30,14 @@ app.get("/", async (req, res) => {
       Cookie: cookie,
     };
 
-    // Forward Range for TS
-    if (req.headers.range) {
-      headers.Range = req.headers.range;
-    }
+    if (req.headers.range) headers.Range = req.headers.range;
 
-    const upstream = await fetch(target, {
-      headers,
-      redirect: "follow",
-    });
+    const upstream = await fetch(target, { headers, redirect: "follow" });
 
-    const contentType = upstream.headers.get("content-type") || "";
-    const isPlaylist =
-      target.endsWith(".m3u8") || contentType.includes("mpegurl");
+    const ct = upstream.headers.get("content-type") || "";
+    const isPlaylist = target.endsWith(".m3u8") || ct.includes("mpegurl");
 
-    // ====== PLAYLIST REWRITE ======
+    // ---------- PLAYLIST ----------
     if (isPlaylist) {
       const text = await upstream.text();
       const base = target.substring(0, target.lastIndexOf("/") + 1);
@@ -53,58 +46,50 @@ app.get("/", async (req, res) => {
       const lines = text.split(/\r?\n/);
       let expectUri = false;
 
-      const rewritten = lines
-        .map((line) => {
-          if (!line) return line;
-          const l = line.trim();
+      const rewritten = lines.map((line) => {
+        if (!line) return line;
+        const l = line.trim();
 
-          if (l.startsWith("#")) {
-            if (l.startsWith("#EXT-X-KEY") && l.includes('URI="')) {
-              return l.replace(/URI="(.*?)"/, (_, p1) => {
-                const resolved = p1.startsWith("http")
-                  ? p1
-                  : new URL(p1, base).toString();
-                return `URI="${proxy}/?url=${encodeURIComponent(resolved)}"`;
-              });
-            }
-
-            expectUri =
-              l.startsWith("#EXTINF") ||
-              l.startsWith("#EXT-X-STREAM-INF") ||
-              l.startsWith("#EXT-X-MEDIA");
-
-            return l;
+        if (l.startsWith("#")) {
+          if (l.startsWith("#EXT-X-KEY") && l.includes('URI="')) {
+            return l.replace(/URI="(.*?)"/, (_, p1) => {
+              const resolved = p1.startsWith("http")
+                ? p1
+                : new URL(p1, base).toString();
+              return `URI="${proxy}/?url=${encodeURIComponent(resolved)}"`;
+            });
           }
+          expectUri =
+            l.startsWith("#EXTINF") ||
+            l.startsWith("#EXT-X-STREAM-INF") ||
+            l.startsWith("#EXT-X-MEDIA");
+          return l;
+        }
 
-          if (expectUri) {
-            expectUri = false;
-            const resolved = l.startsWith("http")
-              ? l
-              : new URL(l, base).toString();
-            return `${proxy}/?url=${encodeURIComponent(resolved)}`;
-          }
-
-          return line;
-        })
-        .join("\n");
+        if (expectUri) {
+          expectUri = false;
+          const resolved = l.startsWith("http")
+            ? l
+            : new URL(l, base).toString();
+          return `${proxy}/?url=${encodeURIComponent(resolved)}`;
+        }
+        return line;
+      }).join("\n");
 
       res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
       return res.send(rewritten);
     }
 
-    // ====== TS / KEY ======
+    // ---------- TS / KEY ----------
     res.status(upstream.status);
     upstream.headers.forEach((v, k) => res.setHeader(k, v));
-
     if (target.endsWith(".ts")) {
       res.setHeader("Content-Type", "video/mp2t");
       res.setHeader("Accept-Ranges", "bytes");
     }
-
     if (target.endsWith(".key")) {
       res.setHeader("Content-Type", "application/octet-stream");
     }
-
     upstream.body.pipe(res);
   } catch (e) {
     res.status(500).send("Proxy error: " + e.message);
